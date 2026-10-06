@@ -8,11 +8,13 @@ Uso:
 """
 
 import argparse
+import platform
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from ultralytics import YOLOE
 
 DEFAULT_VIDEO = Path(__file__).parent / "data" / "conveyor_boxes.mp4"
@@ -44,7 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf", type=float, default=0.2, help="Umbral de confianza.")
     parser.add_argument("--iou", type=float, default=0.5, help="Umbral IoU para NMS.")
     parser.add_argument("--imgsz", type=int, default=640, help="Tamaño de inferencia.")
-    parser.add_argument("--device", default=None, help="cpu, 0 (GPU), mps, ...")
+    parser.add_argument("--device", default=None,
+                        help="cuda:0, cpu, mps... Por defecto usa la GPU NVIDIA si hay una disponible.")
+    parser.add_argument("--no-half", action="store_true",
+                        help="Desactivar FP16 en GPU (usar FP32; más lento, solo si da problemas).")
+    parser.add_argument("--cam-width", type=int, default=1280, help="Ancho pedido a la cámara.")
+    parser.add_argument("--cam-height", type=int, default=720, help="Alto pedido a la cámara.")
     parser.add_argument("--output", default=None,
                         help="Guardar el resultado en este .mp4 (por defecto runs/<nombre>_seg.mp4 para videos).")
     parser.add_argument("--no-show", action="store_true", help="No abrir ventana (útil en servidores).")
@@ -84,6 +91,36 @@ def highlight(frame: np.ndarray, result, label: str, alpha: float = 0.45) -> np.
     return out
 
 
+def resolve_device(requested: str | None) -> str:
+    """Elige el device: el pedido, o la GPU CUDA si existe, o CPU con un aviso."""
+    if requested is not None:
+        if requested not in ("cpu", "mps") and not torch.cuda.is_available():
+            raise SystemExit(
+                "Pediste GPU pero PyTorch no ve CUDA. Probablemente tenés el torch de solo-CPU: "
+                "reinstalalo con CUDA (ver README, sección GPU)."
+            )
+        return requested
+    if torch.cuda.is_available():
+        return "cuda:0"
+    if torch.backends.mps.is_available():
+        return "mps"
+    print(
+        "[aviso] No se detectó GPU CUDA, corriendo en CPU. Si tenés una NVIDIA, instalá torch con CUDA "
+        "(ver README, sección GPU)."
+    )
+    return "cpu"
+
+
+def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
+    # En Windows DirectShow abre la cámara mucho más rápido que el backend por defecto (MSMF).
+    backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
+    cap = cv2.VideoCapture(index, backend)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # menos latencia: no acumular frames viejos
+    return cap
+
+
 def draw_hud(frame: np.ndarray, count: int, fps: float) -> None:
     text = f"Detectadas: {count}   FPS: {fps:.1f}"
     cv2.rectangle(frame, (0, 0), (260, 28), (0, 0, 0), -1)
@@ -93,11 +130,25 @@ def draw_hud(frame: np.ndarray, count: int, fps: float) -> None:
 def main() -> None:
     args = parse_args()
 
+    device = resolve_device(args.device)
+    half = device.startswith("cuda") and not args.no_half
+    if device.startswith("cuda"):
+        torch.backends.cudnn.benchmark = True
+        print(f"Usando GPU: {torch.cuda.get_device_name(device)} ({'FP16' if half else 'FP32'})")
+    else:
+        print(f"Usando device: {device}")
+
     model = YOLOE(args.model)
     model.set_classes(args.prompts)
+    predict_kwargs = dict(
+        conf=args.conf, iou=args.iou, imgsz=args.imgsz, device=device, half=half,
+        agnostic_nms=True, retina_masks=True, verbose=False,
+    )
+    # Warm-up: la primera inferencia en GPU es lenta (carga de kernels / cudnn benchmark).
+    model.predict(np.zeros((args.imgsz, args.imgsz, 3), dtype=np.uint8), **predict_kwargs)
 
     if args.camera is not None:
-        cap = cv2.VideoCapture(args.camera)
+        cap = open_camera(args.camera, args.cam_width, args.cam_height)
         source_name = f"camera{args.camera}"
     else:
         if not Path(args.source).exists():
@@ -125,10 +176,7 @@ def main() -> None:
                 break
 
             t0 = time.perf_counter()
-            result = model.predict(
-                frame, conf=args.conf, iou=args.iou, imgsz=args.imgsz, device=args.device,
-                agnostic_nms=True, retina_masks=True, verbose=False,
-            )[0]
+            result = model.predict(frame, **predict_kwargs)[0]
             dt = time.perf_counter() - t0
             fps = 1.0 / dt if fps == 0 else 0.9 * fps + 0.1 / dt
 
