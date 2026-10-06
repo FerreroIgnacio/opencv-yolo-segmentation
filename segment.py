@@ -55,6 +55,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default=None,
                         help="Guardar el resultado en este .mp4 (por defecto runs/<nombre>_seg.mp4 para videos).")
     parser.add_argument("--no-show", action="store_true", help="No abrir ventana (útil en servidores).")
+    parser.add_argument("--countdown", type=int, default=5,
+                        help="Segundos de cuenta regresiva al tocar 'Guardar imagen' (o la tecla s).")
+    parser.add_argument("--captures-dir", default="runs/captures", help="Carpeta donde se guardan las capturas.")
     return parser.parse_args()
 
 
@@ -127,6 +130,73 @@ def draw_hud(frame: np.ndarray, count: int, fps: float) -> None:
     cv2.putText(frame, text, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
 
+class Capturer:
+    """Botón 'Guardar imagen' en pantalla + cuenta regresiva antes de guardar el frame."""
+
+    BUTTON_TEXT = "Guardar imagen (s)"
+    MESSAGE_SECONDS = 2.5
+
+    def __init__(self, countdown: int, out_dir: str):
+        self.countdown = countdown
+        self.out_dir = Path(out_dir)
+        self.deadline: float | None = None
+        self.message = ""
+        self.message_until = 0.0
+        self.button = (0, 0, 0, 0)  # x1, y1, x2, y2 del último dibujo
+
+    def start(self) -> None:
+        if self.deadline is None:  # si ya hay una cuenta en curso, no la reinicia
+            self.deadline = time.monotonic() + self.countdown
+
+    def on_mouse(self, event, x, y, flags, param) -> None:
+        x1, y1, x2, y2 = self.button
+        if event == cv2.EVENT_LBUTTONDOWN and x1 <= x <= x2 and y1 <= y <= y2:
+            self.start()
+
+    def update(self, raw: np.ndarray, vis: np.ndarray) -> None:
+        """Si terminó la cuenta, guarda. Se llama con el frame ya resaltado, antes de dibujar la UI."""
+        if self.deadline is None or time.monotonic() < self.deadline:
+            return
+        self.deadline = None
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = self.out_dir / f"capture_{stamp}.jpg"
+        cv2.imwrite(str(path), vis)
+        cv2.imwrite(str(self.out_dir / f"capture_{stamp}_raw.jpg"), raw)  # sin máscaras, útil para dataset
+        print(f"Captura guardada en {path}")
+        self.message = f"Guardada: {path}"
+        self.message_until = time.monotonic() + self.MESSAGE_SECONDS
+
+    def draw(self, frame: np.ndarray) -> None:
+        h, w = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Botón abajo a la derecha.
+        (tw, th), _ = cv2.getTextSize(self.BUTTON_TEXT, font, 0.6, 2)
+        x2, y2 = w - 12, h - 12
+        x1, y1 = x2 - tw - 24, y2 - th - 20
+        self.button = (x1, y1, x2, y2)
+        active = self.deadline is not None
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 140, 255) if active else (40, 40, 40), -1)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 1)
+        cv2.putText(frame, self.BUTTON_TEXT, (x1 + 12, y2 - 10), font, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Número grande en el centro durante la cuenta regresiva.
+        if active:
+            remaining = max(1, int(np.ceil(self.deadline - time.monotonic())))
+            text = str(remaining)
+            scale = h / 160
+            thick = max(4, int(scale * 3))
+            (nw, nh), _ = cv2.getTextSize(text, font, scale, thick)
+            org = ((w - nw) // 2, (h + nh) // 2)
+            cv2.putText(frame, text, org, font, scale, (0, 0, 0), thick + 6, cv2.LINE_AA)
+            cv2.putText(frame, text, org, font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+        if time.monotonic() < self.message_until:
+            cv2.rectangle(frame, (0, h - 40), (min(w, 12 + 9 * len(self.message)), h - 12), (0, 0, 0), -1)
+            cv2.putText(frame, self.message, (8, h - 20), font, 0.5, (80, 255, 80), 1, cv2.LINE_AA)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -168,6 +238,11 @@ def main() -> None:
     writer = None
     window = "YOLOE segmentation (q / ESC para salir)"
     fps = 0.0
+    capturer = Capturer(args.countdown, args.captures_dir)
+    if not args.no_show:
+        # GUI_NORMAL oculta la barra de Qt (su botón de guardar no tiene cuenta regresiva); usamos el nuestro.
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL)
+        cv2.setMouseCallback(window, capturer.on_mouse)
 
     try:
         while True:
@@ -191,9 +266,15 @@ def main() -> None:
                 writer.write(vis)
 
             if not args.no_show:
-                cv2.imshow(window, vis)
-                if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                capturer.update(frame, vis)
+                ui = vis.copy()
+                capturer.draw(ui)
+                cv2.imshow(window, ui)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), 27):
                     break
+                if key == ord("s"):
+                    capturer.start()
     finally:
         cap.release()
         if writer is not None:

@@ -69,6 +69,11 @@ python segment.py --camera 1
 
 Se abre una ventana con el resultado; `q` o `ESC` para salir.
 
+**Guardar imagen:** tocá el botón *Guardar imagen* (abajo a la derecha de la ventana) o la tecla `s`.
+Arranca una cuenta regresiva de 5 segundos en pantalla y al llegar a 0 guarda el frame en
+`runs/captures/`: `capture_<fecha>.jpg` (con las máscaras) y `capture_<fecha>_raw.jpg` (la imagen
+original, útil para armar un dataset). La duración se cambia con `--countdown N`.
+
 Opciones útiles:
 
 | Flag | Descripción |
@@ -83,6 +88,8 @@ Opciones útiles:
 | `--cam-width` / `--cam-height` | Resolución pedida a la cámara (default 1280x720) |
 | `--output` | Guardar el video resultante (con `--camera` solo se guarda si lo pasás) |
 | `--no-show` | No abrir ventana (servidores / sin display) |
+| `--countdown` | Segundos de cuenta regresiva antes de guardar la imagen (default 5) |
+| `--captures-dir` | Carpeta de las capturas (default `runs/captures`) |
 
 Al arrancar imprime qué device usa (ej. `Usando GPU: NVIDIA GeForce RTX 3080 Laptop GPU (FP16)`)
 y en la ventana se ve el FPS de inferencia. En CPU `yoloe-26l-seg` anda a ~2 FPS; en una RTX
