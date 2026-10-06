@@ -1,6 +1,6 @@
 # opencv-yolo-segmentation
 
-Segmentación de instancias de **cajas en un conveyor belt** o de **personas** con YOLO + OpenCV.
+Segmentación de instancias de **cajas en un conveyor belt**, de **personas**, o de las dos, con YOLO + OpenCV.
 Resalta cada caja con una máscara semitransparente, su contorno y una etiqueta con la confianza.
 Funciona sobre un video o en vivo desde la cámara.
 
@@ -13,6 +13,9 @@ Según `--target`:
 - **`person`**: `yolo26l-seg.pt`, el YOLO de segmentación estándar entrenado en COCO, filtrado a la
   clase `person`. Para personas es más preciso y rápido que un modelo open-vocabulary.
 - **`box`** (default): YOLOE, explicado abajo.
+- **`both`**: un solo modelo YOLOE con los prompts de caja + `person` (segmenta personas casi igual
+  que el YOLO de COCO, y así no se corren dos modelos). Las personas van en magenta y el contador
+  de arriba separa `person` / `box`.
 
 Con `--prompts` podés pedir otras clases: con YOLO-seg tienen que ser clases de COCO
 (ej. `--target person --prompts person dog`), con YOLOE cualquier texto.
@@ -74,6 +77,9 @@ python segment.py
 python segment.py --target person --camera
 python segment.py --target person --source mi_video.mp4
 
+# Personas y cajas a la vez
+python segment.py --target both --camera
+
 # Sobre otro video
 python segment.py --source mi_video.mp4
 
@@ -93,7 +99,7 @@ Opciones útiles:
 
 | Flag | Descripción |
 |------|-------------|
-| `--target` | `box` (cajas, default) o `person` (personas). Elige modelo, clases y etiqueta |
+| `--target` | `box` (cajas, default), `person` (personas) o `both` (las dos). Elige modelo, clases y etiquetas |
 | `--camera [N]` | Usar la cámara N como input en lugar del video |
 | `--model` | Pesos. Default según target; versiones `s` (`yolo26s-seg.pt`, `yoloe-26s-seg.pt`) son más rápidas y menos precisas |
 | `--prompts ...` | Qué segmentar, como texto. Ej: `--prompts box bottle person` |

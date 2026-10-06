@@ -22,13 +22,21 @@ DEFAULT_VIDEO = Path(__file__).parent / "data" / "conveyor_boxes.mp4"
 
 # Presets por objetivo. Los modelos "yoloe-*" son open-vocabulary (las clases se pasan como
 # texto); el resto son YOLO-seg entrenados en COCO y se filtran por nombre de clase.
+# "labels" mapea cada prompt a la etiqueta que se muestra (los que no están se muestran tal cual).
+BOX_PROMPTS = ["storage box", "toolbox", "cardboard box", "box"]
 TARGETS = {
     # "Caja" no está en COCO: YOLOE con varios sinónimos (mejoran el recall), mostrados como "box".
-    "box": dict(model="yoloe-26l-seg.pt", prompts=["storage box", "toolbox", "cardboard box", "box"],
-                label="box", conf=0.2),
+    "box": dict(model="yoloe-26l-seg.pt", prompts=BOX_PROMPTS,
+                labels={p: "box" for p in BOX_PROMPTS}, conf=0.2),
     # "person" sí está en COCO: un YOLO-seg común es más preciso y más rápido que YOLOE.
-    "person": dict(model="yolo26l-seg.pt", prompts=["person"], label="person", conf=0.35),
+    "person": dict(model="yolo26l-seg.pt", prompts=["person"], labels={}, conf=0.35),
+    # Ambos con un solo modelo: YOLOE segmenta personas casi igual de bien que el YOLO-seg de COCO.
+    "both": dict(model="yoloe-26l-seg.pt", prompts=["person", *BOX_PROMPTS],
+                 labels={p: "box" for p in BOX_PROMPTS}, conf=0.2),
 }
+
+# Color fijo para personas, así se distinguen de las cajas (que usan la paleta por instancia).
+PERSON_COLOR = (255, 0, 255)
 
 HUD_HEIGHT = 28
 
@@ -43,7 +51,8 @@ PALETTE = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Segmenta y resalta cajas o personas con YOLO.")
     parser.add_argument("--target", choices=TARGETS, default="box",
-                        help="Qué segmentar: box (cajas) o person (personas). Define modelo, prompts y etiqueta.")
+                        help="Qué segmentar: box (cajas), person (personas) o both (las dos). "
+                             "Define modelo, prompts y etiquetas.")
     src = parser.add_mutually_exclusive_group()
     src.add_argument("--source", type=str, default=str(DEFAULT_VIDEO), help="Ruta a un video o imagen.")
     src.add_argument(
@@ -57,7 +66,8 @@ def parse_args() -> argparse.Namespace:
                         help="Clases a segmentar como texto (por defecto según --target). Con YOLOE vale "
                              "cualquier texto; con YOLO-seg tienen que ser clases de COCO.")
     parser.add_argument("--label", default=None,
-                        help="Etiqueta a mostrar (por defecto según --target); '' para usar el nombre de la clase.")
+                        help="Etiqueta única para todas las detecciones; '' para mostrar el nombre de cada "
+                             "clase/prompt. Por defecto según --target.")
     parser.add_argument("--conf", type=float, default=None, help="Umbral de confianza (por defecto según --target).")
     parser.add_argument("--iou", type=float, default=0.5, help="Umbral IoU para NMS.")
     parser.add_argument("--imgsz", type=int, default=640, help="Tamaño de inferencia.")
@@ -75,9 +85,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--captures-dir", default="runs/captures", help="Carpeta donde se guardan las capturas.")
     args = parser.parse_args()
     preset = TARGETS[args.target]
-    for key in ("model", "prompts", "label", "conf"):
+    for key in ("model", "prompts", "conf"):
         if getattr(args, key) is None:
             setattr(args, key, preset[key])
+    if args.label is None:
+        args.labels = preset["labels"]
+    elif args.label == "":
+        args.labels = {}
+    else:
+        args.labels = {p: args.label for p in args.prompts}
     return args
 
 
@@ -98,7 +114,16 @@ def load_model(weights: str, prompts: list[str]):
     return model, [name_to_id[p] for p in prompts]
 
 
-def highlight(frame: np.ndarray, result, label: str, alpha: float = 0.45) -> np.ndarray:
+def display_names(result, labels: dict[str, str]) -> list[str]:
+    """Etiqueta a mostrar para cada detección."""
+    return [labels.get(result.names[int(c)], result.names[int(c)]) for c in result.boxes.cls]
+
+
+def color_for(i: int, name: str) -> tuple[int, int, int]:
+    return PERSON_COLOR if name == "person" else PALETTE[i % len(PALETTE)]
+
+
+def highlight(frame: np.ndarray, result, names: list[str], alpha: float = 0.45) -> np.ndarray:
     """Pinta máscara semitransparente, contorno y etiqueta para cada instancia."""
     out = frame.copy()
     if result.masks is None or len(result.boxes) == 0:
@@ -108,12 +133,11 @@ def highlight(frame: np.ndarray, result, label: str, alpha: float = 0.45) -> np.
     polygons = result.masks.xy  # contornos en coordenadas de la imagen original
     boxes = result.boxes.xyxy.cpu().numpy().astype(int)
     confs = result.boxes.conf.cpu().numpy()
-    classes = result.boxes.cls.cpu().numpy().astype(int)
 
     for i, poly in enumerate(polygons):
         if len(poly) < 3:
             continue
-        color = PALETTE[i % len(PALETTE)]
+        color = color_for(i, names[i])
         pts = poly.astype(np.int32).reshape(-1, 1, 2)
         cv2.fillPoly(overlay, [pts], color)
         cv2.polylines(out, [pts], isClosed=True, color=color, thickness=2, lineType=cv2.LINE_AA)
@@ -121,9 +145,8 @@ def highlight(frame: np.ndarray, result, label: str, alpha: float = 0.45) -> np.
     out = cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0)
 
     for i, (x1, y1, _, _) in enumerate(boxes):
-        color = PALETTE[i % len(PALETTE)]
-        name = label or result.names[classes[i]]
-        text = f"{name} {confs[i]:.2f}"
+        color = color_for(i, names[i])
+        text = f"{names[i]} {confs[i]:.2f}"
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         y = max(y1, th + 6 + HUD_HEIGHT)  # que no quede tapada por el HUD
         cv2.rectangle(out, (x1, y - th - 6), (x1 + tw + 6, y), color, -1)
@@ -161,9 +184,12 @@ def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
     return cap
 
 
-def draw_hud(frame: np.ndarray, count: int, fps: float) -> None:
-    text = f"Detectadas: {count}   FPS: {fps:.1f}"
-    cv2.rectangle(frame, (0, 0), (260, HUD_HEIGHT), (0, 0, 0), -1)
+def draw_hud(frame: np.ndarray, names: list[str], fps: float) -> None:
+    counts = {n: names.count(n) for n in dict.fromkeys(names)}
+    detail = "  ".join(f"{n}: {c}" for n, c in counts.items())
+    text = f"Detectadas: {len(names)}" + (f" ({detail})" if len(counts) > 1 else "") + f"   FPS: {fps:.1f}"
+    (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    cv2.rectangle(frame, (0, 0), (tw + 16, HUD_HEIGHT), (0, 0, 0), -1)
     cv2.putText(frame, text, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
 
@@ -292,8 +318,9 @@ def main() -> None:
             dt = time.perf_counter() - t0
             fps = 1.0 / dt if fps == 0 else 0.9 * fps + 0.1 / dt
 
-            vis = highlight(frame, result, args.label)
-            draw_hud(vis, len(result.boxes), fps)
+            names = display_names(result, args.labels)
+            vis = highlight(frame, result, names)
+            draw_hud(vis, names, fps)
 
             if output:
                 if writer is None:
