@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+# Pesos y encoders de texto que Ultralytics descarga automáticamente
+*.pt
+*.ts
+runs/
