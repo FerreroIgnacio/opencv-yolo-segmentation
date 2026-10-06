@@ -1,7 +1,8 @@
-"""Segmentación de cajas con YOLO (YOLOE, open-vocabulary) + OpenCV.
+"""Segmentación de cajas o personas con YOLO + OpenCV.
 
 Uso:
-    python segment.py                      # corre sobre el video de ejemplo
+    python segment.py                      # cajas, sobre el video de ejemplo
+    python segment.py --target person      # personas
     python segment.py --source otro.mp4    # corre sobre otro video
     python segment.py --camera             # usa la webcam (índice 0)
     python segment.py --camera 1           # usa la cámara con índice 1
@@ -15,12 +16,21 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from ultralytics import YOLOE
+from ultralytics import YOLO, YOLOE
 
 DEFAULT_VIDEO = Path(__file__).parent / "data" / "conveyor_boxes.mp4"
-# YOLOE es open-vocabulary: se le pasan "clases" como texto. Varios sinónimos
-# mejoran el recall; en la visualización se muestran todos como "box".
-DEFAULT_PROMPTS = ["storage box", "toolbox", "cardboard box", "box"]
+
+# Presets por objetivo. Los modelos "yoloe-*" son open-vocabulary (las clases se pasan como
+# texto); el resto son YOLO-seg entrenados en COCO y se filtran por nombre de clase.
+TARGETS = {
+    # "Caja" no está en COCO: YOLOE con varios sinónimos (mejoran el recall), mostrados como "box".
+    "box": dict(model="yoloe-26l-seg.pt", prompts=["storage box", "toolbox", "cardboard box", "box"],
+                label="box", conf=0.2),
+    # "person" sí está en COCO: un YOLO-seg común es más preciso y más rápido que YOLOE.
+    "person": dict(model="yolo26l-seg.pt", prompts=["person"], label="person", conf=0.35),
+}
+
+HUD_HEIGHT = 28
 
 # Paleta BGR para distinguir instancias.
 PALETTE = [
@@ -31,19 +41,24 @@ PALETTE = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Segmenta y resalta cajas con YOLOE.")
+    parser = argparse.ArgumentParser(description="Segmenta y resalta cajas o personas con YOLO.")
+    parser.add_argument("--target", choices=TARGETS, default="box",
+                        help="Qué segmentar: box (cajas) o person (personas). Define modelo, prompts y etiqueta.")
     src = parser.add_mutually_exclusive_group()
     src.add_argument("--source", type=str, default=str(DEFAULT_VIDEO), help="Ruta a un video o imagen.")
     src.add_argument(
         "--camera", type=int, nargs="?", const=0, default=None,
         help="Usar la cámara como input (índice opcional, por defecto 0).",
     )
-    parser.add_argument("--model", default="yoloe-26l-seg.pt",
-                        help="Pesos YOLOE de segmentación (ej. yoloe-26s-seg.pt para más velocidad).")
-    parser.add_argument("--prompts", nargs="+", default=DEFAULT_PROMPTS,
-                        help="Qué segmentar, como texto (ej. --prompts box bottle).")
-    parser.add_argument("--label", default="box", help="Etiqueta a mostrar; '' para usar el nombre del prompt.")
-    parser.add_argument("--conf", type=float, default=0.2, help="Umbral de confianza.")
+    parser.add_argument("--model", default=None,
+                        help="Pesos de segmentación (por defecto según --target; ej. yolo26s-seg.pt / "
+                             "yoloe-26s-seg.pt para más velocidad).")
+    parser.add_argument("--prompts", nargs="+", default=None,
+                        help="Clases a segmentar como texto (por defecto según --target). Con YOLOE vale "
+                             "cualquier texto; con YOLO-seg tienen que ser clases de COCO.")
+    parser.add_argument("--label", default=None,
+                        help="Etiqueta a mostrar (por defecto según --target); '' para usar el nombre de la clase.")
+    parser.add_argument("--conf", type=float, default=None, help="Umbral de confianza (por defecto según --target).")
     parser.add_argument("--iou", type=float, default=0.5, help="Umbral IoU para NMS.")
     parser.add_argument("--imgsz", type=int, default=640, help="Tamaño de inferencia.")
     parser.add_argument("--device", default=None,
@@ -53,12 +68,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cam-width", type=int, default=1280, help="Ancho pedido a la cámara.")
     parser.add_argument("--cam-height", type=int, default=720, help="Alto pedido a la cámara.")
     parser.add_argument("--output", default=None,
-                        help="Guardar el resultado en este .mp4 (por defecto runs/<nombre>_seg.mp4 para videos).")
+                        help="Guardar el resultado en este .mp4 (por defecto runs/<nombre>_<target>_seg.mp4 para videos).")
     parser.add_argument("--no-show", action="store_true", help="No abrir ventana (útil en servidores).")
     parser.add_argument("--countdown", type=int, default=5,
                         help="Segundos de cuenta regresiva al tocar 'Guardar imagen' (o la tecla s).")
     parser.add_argument("--captures-dir", default="runs/captures", help="Carpeta donde se guardan las capturas.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    preset = TARGETS[args.target]
+    for key in ("model", "prompts", "label", "conf"):
+        if getattr(args, key) is None:
+            setattr(args, key, preset[key])
+    return args
+
+
+def load_model(weights: str, prompts: list[str]):
+    """Devuelve (modelo, ids de clase a filtrar o None)."""
+    if Path(weights).name.startswith("yoloe"):
+        model = YOLOE(weights)
+        model.set_classes(prompts)
+        return model, None
+    model = YOLO(weights)
+    name_to_id = {name: i for i, name in model.names.items()}
+    unknown = [p for p in prompts if p not in name_to_id]
+    if unknown:
+        raise SystemExit(
+            f"{unknown} no son clases de {weights}. Clases válidas: {', '.join(model.names.values())}. "
+            "Para texto libre usá un modelo YOLOE (ej. --model yoloe-26l-seg.pt)."
+        )
+    return model, [name_to_id[p] for p in prompts]
 
 
 def highlight(frame: np.ndarray, result, label: str, alpha: float = 0.45) -> np.ndarray:
@@ -88,7 +125,7 @@ def highlight(frame: np.ndarray, result, label: str, alpha: float = 0.45) -> np.
         name = label or result.names[classes[i]]
         text = f"{name} {confs[i]:.2f}"
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        y = max(y1, th + 6)
+        y = max(y1, th + 6 + HUD_HEIGHT)  # que no quede tapada por el HUD
         cv2.rectangle(out, (x1, y - th - 6), (x1 + tw + 6, y), color, -1)
         cv2.putText(out, text, (x1 + 3, y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     return out
@@ -126,7 +163,7 @@ def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
 
 def draw_hud(frame: np.ndarray, count: int, fps: float) -> None:
     text = f"Detectadas: {count}   FPS: {fps:.1f}"
-    cv2.rectangle(frame, (0, 0), (260, 28), (0, 0, 0), -1)
+    cv2.rectangle(frame, (0, 0), (260, HUD_HEIGHT), (0, 0, 0), -1)
     cv2.putText(frame, text, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
 
@@ -208,10 +245,10 @@ def main() -> None:
     else:
         print(f"Usando device: {device}")
 
-    model = YOLOE(args.model)
-    model.set_classes(args.prompts)
+    model, classes = load_model(args.model, args.prompts)
+    print(f"Objetivo: {args.target} | modelo: {args.model} | clases: {', '.join(args.prompts)}")
     predict_kwargs = dict(
-        conf=args.conf, iou=args.iou, imgsz=args.imgsz, device=device, half=half,
+        conf=args.conf, iou=args.iou, imgsz=args.imgsz, device=device, half=half, classes=classes,
         agnostic_nms=True, retina_masks=True, verbose=False,
     )
     # Warm-up: la primera inferencia en GPU es lenta (carga de kernels / cudnn benchmark).
@@ -232,11 +269,11 @@ def main() -> None:
 
     output = args.output
     if output is None and args.camera is None:
-        output = str(Path("runs") / f"{source_name}_seg.mp4")
+        output = str(Path("runs") / f"{source_name}_{args.target}_seg.mp4")
 
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     writer = None
-    window = "YOLOE segmentation (q / ESC para salir)"
+    window = f"YOLO segmentation: {args.target} (q / ESC para salir)"
     fps = 0.0
     capturer = Capturer(args.countdown, args.captures_dir)
     if not args.no_show:

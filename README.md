@@ -1,12 +1,23 @@
 # opencv-yolo-segmentation
 
-Segmentación de instancias de **cajas en un conveyor belt** con YOLO + OpenCV.
+Segmentación de instancias de **cajas en un conveyor belt** o de **personas** con YOLO + OpenCV.
 Resalta cada caja con una máscara semitransparente, su contorno y una etiqueta con la confianza.
 Funciona sobre un video o en vivo desde la cámara.
 
 ![demo](docs/demo.jpg)
 
-## Modelo
+## Modelos
+
+Según `--target`:
+
+- **`person`**: `yolo26l-seg.pt`, el YOLO de segmentación estándar entrenado en COCO, filtrado a la
+  clase `person`. Para personas es más preciso y rápido que un modelo open-vocabulary.
+- **`box`** (default): YOLOE, explicado abajo.
+
+Con `--prompts` podés pedir otras clases: con YOLO-seg tienen que ser clases de COCO
+(ej. `--target person --prompts person dog`), con YOLOE cualquier texto.
+
+### YOLOE (cajas)
 
 Se usa **YOLOE** (`yoloe-26l-seg.pt`, de [Ultralytics](https://docs.ultralytics.com/models/yoloe/)),
 un YOLO de segmentación *open-vocabulary*: en vez de estar limitado a las 80 clases de COCO
@@ -56,8 +67,12 @@ pip install -r requirements.txt
 ## Uso
 
 ```bash
-# Sobre el video de ejemplo (data/conveyor_boxes.mp4). Guarda el resultado en runs/conveyor_boxes_seg.mp4
+# Cajas, sobre el video de ejemplo (data/conveyor_boxes.mp4). Guarda runs/conveyor_boxes_box_seg.mp4
 python segment.py
+
+# Personas (con la cámara o sobre un video)
+python segment.py --target person --camera
+python segment.py --target person --source mi_video.mp4
 
 # Sobre otro video
 python segment.py --source mi_video.mp4
@@ -78,11 +93,12 @@ Opciones útiles:
 
 | Flag | Descripción |
 |------|-------------|
+| `--target` | `box` (cajas, default) o `person` (personas). Elige modelo, clases y etiqueta |
 | `--camera [N]` | Usar la cámara N como input en lugar del video |
-| `--model` | Pesos YOLOE. `yoloe-26s-seg.pt` es bastante más rápido en CPU (menos preciso) |
+| `--model` | Pesos. Default según target; versiones `s` (`yolo26s-seg.pt`, `yoloe-26s-seg.pt`) son más rápidas y menos precisas |
 | `--prompts ...` | Qué segmentar, como texto. Ej: `--prompts box bottle person` |
 | `--label` | Etiqueta a mostrar (por defecto `box`; `--label ""` muestra el prompt que matcheó) |
-| `--conf` | Umbral de confianza (default 0.2) |
+| `--conf` | Umbral de confianza (default 0.2 para cajas, 0.35 para personas) |
 | `--device` | Por defecto usa la GPU CUDA si existe; si no, CPU. Forzar con `cuda:0`, `cpu`, `mps` |
 | `--no-half` | En GPU se usa FP16 (más rápido); esto fuerza FP32 si hay problemas de precisión |
 | `--cam-width` / `--cam-height` | Resolución pedida a la cámara (default 1280x720) |
